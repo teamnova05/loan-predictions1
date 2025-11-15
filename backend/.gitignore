@@ -1,0 +1,19 @@
+﻿# Python
+__pycache__/
+*.pyc
+
+# Virtual environment
+venv/
+
+# Environment variables
+.env
+
+# Model files
+models/*.joblib
+models/*.pkl
+
+# VSCode
+.vscode/
+
+# Logs
+logs/
