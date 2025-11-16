@@ -12,11 +12,13 @@ def create_app():
     # ============================
     from routes.predict import predict_bp
     from routes.fraud import fraud_bp
-    from routes.requests import req_bp  # <-- NEW ROUTE
+    from routes.requests import req_bp
+    from routes.ml_predict import ml_bp   # <-- ADDED
 
     app.register_blueprint(predict_bp, url_prefix="/api")
     app.register_blueprint(fraud_bp, url_prefix="/api")
-    app.register_blueprint(req_bp, url_prefix="/api")  # <-- REGISTER HERE
+    app.register_blueprint(req_bp, url_prefix="/api")
+    app.register_blueprint(ml_bp, url_prefix="/api")  # <-- ADDED
 
     # ============================
     # Health check route
