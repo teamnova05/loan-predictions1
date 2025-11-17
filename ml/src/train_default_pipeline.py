@@ -1,7 +1,8 @@
 # ml/src/train_default_pipeline.py
 """
 Train baseline pipelines (Logistic Regression + Random Forest) on loan_data.csv
-Assumes you're running from ml/src (so dataset path is ../datasets/loan_data.csv and save_dir is ../models)
+Updated to use robust preprocessor and save feature names for later use.
+Run from ml/src or call with explicit --dataset/--save_dir paths.
 """
 import argparse
 import os
@@ -9,16 +10,14 @@ import joblib
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import inspect
 
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
 from sklearn.pipeline import Pipeline
-from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
+
+from preprocess import build_preprocessor, get_feature_names_from_preprocessor
 
 def load_data(path):
     df = pd.read_csv(path)
@@ -30,49 +29,6 @@ def get_feature_columns(df, target_col):
     categorical_cols = [c for c in cols if c not in numeric_cols]
     return numeric_cols, categorical_cols
 
-# ---------- Robust build_preprocessor (replace older version) ----------
-def _onehot_encoder_compat(**kwargs):
-    """
-    Return a OneHotEncoder compatible with your installed sklearn version.
-    Newer sklearn uses 'sparse_output'. Older uses 'sparse'.
-    """
-    onehot_init_sig = inspect.signature(OneHotEncoder)
-    params = onehot_init_sig.parameters
-
-    # translate kwarg names according to installed sklearn
-    if 'sparse' in params:
-        # older sklearn: allow passing 'sparse' if user supplied 'sparse_output'
-        if 'sparse_output' in kwargs:
-            kwargs['sparse'] = kwargs.pop('sparse_output')
-    else:
-        # newer sklearn: map 'sparse' to 'sparse_output' if provided
-        if 'sparse' in kwargs:
-            kwargs['sparse_output'] = kwargs.pop('sparse')
-
-    return OneHotEncoder(**kwargs)
-
-def build_preprocessor(numeric_cols, categorical_cols):
-    numeric_transformer = Pipeline([
-        ('imputer', SimpleImputer(strategy='median')),
-        ('scaler', StandardScaler())
-    ])
-
-    categorical_transformer = Pipeline([
-        ('imputer', SimpleImputer(strategy='constant', fill_value='missing')),
-        # create OneHotEncoder with correct kwarg for current sklearn
-        ('onehot', _onehot_encoder_compat(handle_unknown='ignore', sparse_output=False))
-    ])
-
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ('num', numeric_transformer, numeric_cols),
-            ('cat', categorical_transformer, categorical_cols)
-        ],
-        remainder='drop'
-    )
-    return preprocessor
-# ---------------------------------------------------------------------
-
 def save_confusion_matrix(y_true, y_pred, outpath):
     cm = confusion_matrix(y_true, y_pred)
     fig, ax = plt.subplots(figsize=(4,4))
@@ -81,7 +37,8 @@ def save_confusion_matrix(y_true, y_pred, outpath):
     ax.set_xlabel('Predicted')
     ax.set_ylabel('Actual')
     for (i, j), val in np.ndenumerate(cm):
-        ax.text(j, i, int(val), ha='center', va='center', color='white' if cm.max()>0 and val>cm.max()/2 else 'black')
+        ax.text(j, i, int(val), ha='center', va='center',
+                color='white' if cm.max()>0 and val>cm.max()/2 else 'black')
     plt.tight_layout()
     fig.savefig(outpath)
     plt.close(fig)
@@ -99,11 +56,9 @@ def main(dataset_path, save_dir, test_size=0.2, random_state=42):
     print("Target value counts:")
     print(df[target].value_counts(dropna=False))
 
-    # Copy target
     y = df[target].copy()
     X = df.drop(columns=[target])
 
-    # If target is string/binary-like, map to 0/1
     if y.dtype == object or y.dtype.name == 'category':
         unique_vals = list(y.dropna().unique())
         if len(unique_vals) == 2:
@@ -119,7 +74,6 @@ def main(dataset_path, save_dir, test_size=0.2, random_state=42):
         else:
             print("Numeric target detected with values:", unique_vals[:10], "... (not strictly 0/1). Proceeding as-is.")
 
-    # train-test split (use stratify if appropriate)
     stratify = y if len(np.unique(y.dropna())) > 1 else None
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=float(test_size), random_state=int(random_state), stratify=stratify
@@ -131,6 +85,17 @@ def main(dataset_path, save_dir, test_size=0.2, random_state=42):
     print("Categorical cols (sample up to 20):", categorical_cols[:20])
 
     preprocessor = build_preprocessor(numeric_cols, categorical_cols)
+
+    try:
+        feature_names = get_feature_names_from_preprocessor(preprocessor, numeric_cols, categorical_cols)
+        if feature_names:
+            fn_path = os.path.join(save_dir, "feature_names.csv")
+            pd.DataFrame({"feature": feature_names}).to_csv(fn_path, index=False)
+            print("Saved feature names to:", fn_path)
+        else:
+            print("Feature names could not be fully derived. Downstream plots may show generic names.")
+    except Exception as e:
+        print("Could not extract feature names:", e)
 
     models = {
         'logreg': LogisticRegression(max_iter=1000, random_state=int(random_state), class_weight='balanced', solver='lbfgs'),
@@ -155,7 +120,6 @@ def main(dataset_path, save_dir, test_size=0.2, random_state=42):
         print("Classification report:")
         print(classification_report(y_test, y_pred, zero_division=0))
 
-        # save confusion matrix
         cm_path = os.path.join(save_dir, f"{name}_confusion_matrix.png")
         try:
             save_confusion_matrix(y_test, y_pred, cm_path)
@@ -163,20 +127,19 @@ def main(dataset_path, save_dir, test_size=0.2, random_state=42):
         except Exception as e:
             print("Could not save confusion matrix:", e)
 
-        # save pipeline
         save_path = os.path.join(save_dir, f"{name}_pipeline.joblib")
         joblib.dump(pipe, save_path)
         print(f"Saved pipeline to {save_path}")
 
         results[name] = {'cv_scores': cv_scores, 'test_acc': acc}
 
-    # write summary csv
     summary = []
     for name in results:
         cv_mean = float(np.nanmean(results[name]['cv_scores']))
         summary.append({'model': name, 'cv_mean_accuracy': cv_mean, 'test_accuracy': float(results[name]['test_acc'])})
     pd.DataFrame(summary).to_csv(os.path.join(save_dir, "training_summary.csv"), index=False)
     print("Training complete. Summary saved to", os.path.join(save_dir, "training_summary.csv"))
+
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
